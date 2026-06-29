@@ -1,34 +1,21 @@
 """Pixel-shuffle + MLP connector (the "bridge" the placeholder did as one Linear).
 
 Two jobs:
-  1. **Compress** visual tokens. A 448 tile at patch-14 is a 32x32=1024-token grid;
-     pixel-shuffle by 2 folds each 2x2 block into the channel dim -> 16x16=256
-     tokens with 4x the channels. This keeps full-page token counts tractable for a
-     small decoder.
-  2. **Project** from the (shuffled) vision dim into the LLM embedding dim.
+  1. **Compress** visual tokens. Folding each ``s x s`` block of patches into the
+     channel dimension (``torch.nn.functional.pixel_unshuffle``) cuts the token
+     count by ``s^2`` while growing the feature dim by ``s^2``. Keeps full-page
+     token counts tractable for a small decoder.
+  2. **Project** the compressed features into the LLM embedding dim.
 
-The LLM hidden size is passed in from the loaded model config, never hardcoded.
+Operates on a spatial map ``[B, C, H, W]`` so it handles **rectangular** grids
+(native aspect-preserving mode) as well as square tiles. The LLM hidden size is
+passed in from the loaded model config, never hardcoded.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
-
-
-def pixel_shuffle(x: torch.Tensor, scale: int) -> torch.Tensor:
-    """``[B, H*W, C] -> [B, (H/scale)*(W/scale), C*scale*scale]`` (square grid)."""
-    b, n, c = x.shape
-    hw = int(round(n ** 0.5))
-    if hw * hw != n:
-        raise ValueError(f"expected a square patch grid, got {n} tokens")
-    if hw % scale != 0:
-        raise ValueError(f"grid {hw} not divisible by pixel-shuffle scale {scale}")
-    x = x.view(b, hw, hw, c)
-    x = x.view(b, hw, hw // scale, c * scale)
-    x = x.permute(0, 2, 1, 3).contiguous()
-    x = x.view(b, hw // scale, hw // scale, c * scale * scale)
-    x = x.view(b, (hw // scale) * (hw // scale), c * scale * scale)
-    return x
+import torch.nn.functional as F
 
 
 class PixelShuffleProjector(nn.Module):
@@ -43,7 +30,11 @@ class PixelShuffleProjector(nn.Module):
             layers += [act(), nn.Linear(llm_dim, llm_dim)]
         self.net = nn.Sequential(*layers)
 
-    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
-        """``[n_tiles, num_patches, vision_dim] -> [n_tiles, num_tokens, llm_dim]``."""
-        x = pixel_shuffle(patch_tokens, self.scale)
+    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
+        """``[B, C, H, W] -> [B, (H/s)*(W/s), llm_dim]``."""
+        b, c, h, w = feature_map.shape
+        if h % self.scale or w % self.scale:
+            raise ValueError(f"feature grid {h}x{w} not divisible by pixel-shuffle scale {self.scale}")
+        x = F.pixel_unshuffle(feature_map, self.scale)  # [B, C*s*s, H/s, W/s]
+        x = x.flatten(2).transpose(1, 2)                # [B, (H/s)*(W/s), C*s*s]
         return self.net(x)

@@ -48,15 +48,15 @@ So the lineage is: **TIPS** (encoder) × **Eagle/Surya** (connector + coordinate
                  page image (variable size)
                           │
         ┌─────────────────┴──────────────────┐
-        │  AnyRes tiling (aspect-preserving,  │   tiles are multiples of patch_size
-        │  multiple-of-14 tiles + thumbnail)  │
+        │  preprocess (ToTensor, [0,1]):      │   native = aspect-preserving rect
+        │  native (default) | single | anyres │   every side a multiple of 28
         └─────────────────┬──────────────────┘
-                          │  [n_tiles, 3, T, T]
+                          │  list of units [3, H, W]  (sizes may vary)
                  ┌────────▼─────────┐
-                 │  TIPSv2 L/14     │  frozen (stage A) → optionally unfrozen (stage C)
-                 │  vision encoder  │  returns patch tokens, drops CLS/register tokens
+                 │  TIPSv2 L/14     │  HF AutoModel (-dpt, trust_remote_code);
+                 │  vision encoder  │  get_intermediate_layers → [B,1024,h,w]
                  └────────┬─────────┘
-                          │  [n_tiles, (T/14)^2, 1024]
+                          │  [B, 1024, H/14, W/14]  patch feature map
                  ┌────────▼─────────┐
                  │ Pixel-shuffle ×2 │  (T/14)^2 → (T/28)^2 tokens, 1024 → 4096
                  │   + MLP (GELU)   │  4096 → llm_hidden
@@ -80,32 +80,55 @@ So the lineage is: **TIPS** (encoder) × **Eagle/Surya** (connector + coordinate
 HTR needs **high resolution** (small handwriting, diacritics, faded ink) but high resolution
 explodes the visual-token count, which a 0.6–0.8B decoder cannot absorb cheaply.
 
-- A single 448×448 tile at patch-14 → 32×32 = **1024 patches**. Pixel-shuffle ×2 → **256 tokens**.
-- A full A4 page tiled at 448 to roughly preserve detail might be ~3×4 = 12 tiles + 1 thumbnail
-  → 13 × 256 ≈ **3,328 visual tokens** before any text. That is fine for Qwen's 262K context but
-  expensive for the decoder. Hence: **pixel-shuffle compression is not optional**, and the tile
-  grid is a tunable quality/cost knob (`configs/base.yaml: vision.max_tiles`).
+- **Native** (default): a portrait page snapped to e.g. 1372×980 → 98×70 patches → ×2 shuffle →
+  49×35 = **1,715 tokens** (and *no* padding tokens — the win over a square pass).
+- **Single pass**: @896 → 64×64 = 4096 patches → ×2 shuffle → **1024 tokens**; @1372 (square) →
+  98×98 → **2401 tokens**; @1792 → 128×128 → **4096 tokens**.
+- **AnyRes**: a 448 tile → 32×32 = 1024 patches → ×2 shuffle → **256 tokens**; a full page at
+  ~12 tiles + thumbnail → ~3,328 tokens.
+- All of these fit Qwen's 262K context but are expensive for a 0.8B decoder. Hence
+  **pixel-shuffle compression is not optional**, and the resolution / tile grid is the tunable
+  quality–cost knob (`configs/base.yaml: vision_input.native_target` / `resolution` / `max_tiles`).
 
 This is exactly why `placeholder.py`'s "resize the whole page to 1024×1024 and feed it raw" is
 the wrong default (see §7).
 
 ---
 
-## 3. Resolution, tiling & preprocessing
+## 3. Resolution, input modes & preprocessing
 
-- **Aspect-ratio preservation.** Squishing a page to 1024×1024 distorts glyph shapes — fatal for
-  handwriting. We use **AnyRes / LLaVA-NeXT-style dynamic tiling**: pick the tile grid whose
-  aspect ratio best matches the page, resize to that grid, split into fixed `T×T` tiles, and add
-  one downsized **thumbnail** tile for global layout.
-- **Patch divisibility.** Tile size `T` must be a multiple of `patch_size` (14) **and** of
-  `patch_size × pixel_shuffle` (28) so shuffle is clean. `448 = 14×32 = 28×16` ✓.
-  (`1024` used in the placeholder is **not** divisible by 14 — the placeholder silently relies on
-  the encoder to crop/pad, losing edge text.)
-- **Position embeddings.** TIPS is trained at a fixed grid; feeding `T=448` requires
-  **bicubic interpolation of the positional embeddings** to the tile grid. The wrapper does this
-  once at load and caches it. (Confirm TIPSv2's native train resolution from the cloned repo.)
-- **Normalization.** Use TIPS's expected mean/std (confirm from the repo; default placeholder of
-  `pixel/255` only is almost certainly wrong). Configurable in `vision.image_mean/std`.
+TIPSv2 natively accepts a **resolution ladder of 224→1792** (all multiples of patch-14:
+224, 336, 448, 672, 896, 1120, 1372, 1792). That changes the calculus from the original sketch:
+for most pages a single high-res pass is enough, and explicit tiling is only needed for very
+large / high-DPI scans.
+
+- **Three input modes** (`vision_input.mode`):
+  - **`native` (default, recommended).** One **aspect-preserving rectangular** unit: resize the
+    longer side toward `native_target` (default **1372**) and snap **both** sides to the divisor
+    `patch_size × pixel_shuffle` (28). No padding waste, glyph aspect ratio preserved. This is the
+    official TIPS dense recipe (`resize_transform` in the foreground-seg Colab: height fixed,
+    width scaled, both rounded to ×14) — the encoder handles rectangular inputs via pos-embed
+    interpolation.
+  - **`single`.** One square pass at `vision_input.resolution` (default 896). `aspect="pad"`
+    letterboxes on white; `aspect="squish"` reproduces the demo's `Resize((res,res))`.
+  - **`anyres`.** LLaVA-NeXT-style dynamic tiling into `tile_size` tiles (+ thumbnail) for pages
+    whose detail exceeds 1792px or whose aspect ratio is extreme.
+- **Normalization = ToTensor only.** TIPS uses `IMAGE_MEAN=(0,0,0)`, `IMAGE_STD=(1,1,1)` — pixels
+  in `[0,1]` with **no** mean/std (confirmed in both the HF demo and the Colab). The placeholder's
+  `pixel/255` was actually right; the trap is adding a mean/std the encoder never saw.
+- **Patch divisibility.** Every side must be a multiple of `patch_size` (14) **and** of
+  `patch_size × pixel_shuffle` (28) so the shuffle is clean. `896 = 28×32` ✓, `1372 = 28×49` ✓,
+  `448 = 28×16` ✓; native mode snaps to this automatically. (The placeholder's `1024` is **not**
+  divisible by 14.)
+- **Position embeddings.** TIPSv2 is trained mostly at 224/448; higher/rectangular sizes rely on
+  the encoder's **pos-embed interpolation** (`interpolate_antialias=True`). It works (the demo
+  exposes the whole ladder and the Colab feeds rectangular inputs), but treat very high
+  resolutions as interpolation-dependent and validate dense quality — small handwriting is exactly
+  where this matters.
+- **Feature path.** `vision.feature_mode="intermediate"` (default) uses
+  `get_intermediate_layers(x, n=1, reshape=True, norm=True)[-1]` — the official dense-task API
+  (used for the seg probe), returning a `[B, C, H, W]` map. `"value"` uses the value-attention
+  last-block surgery (sharper per-patch features); `"standard"` is the plain forward.
 
 ---
 
@@ -182,13 +205,13 @@ projector while also updating pretrained weights:
 
 | # | Issue in `placeholder.py` | Fix in this design |
 |---|---|---|
-| 1 | `AutoModel.from_pretrained("google/tipsv2-l14-dpt", trust_remote_code=True)` — TIPS is **not** a HF AutoModel; checkpoints are `.npz` loaded via the repo's own `image_encoder.py`. | `vision/tips_encoder.py` wraps the vendored TIPS `VisionTransformer` (`vit_large(patch_size=14)`), loads the `.npz`, returns patch tokens. |
-| 2 | `self.vision_model(pixel_values).last_hidden_state` — TIPS forward returns `(cls1, cls2, patch_features)`, no `.last_hidden_state`. | Wrapper returns `patch_features` explicitly (CLS/register tokens dropped). |
+| 1 | `self.vision_model(pixel_values).last_hidden_state` — the **load id is correct** (TIPSv2 *is* a HF AutoModel via the `-dpt` repos), but you must call `dpt._get_backbone()` and use `dpt._backbone.vision_encoder`, whose forward returns a **3-tuple** `(cls, _, patch_tokens)` — there is no `.last_hidden_state`. | `vision/tips_encoder.py` loads the DPT AutoModel, grabs `._backbone.vision_encoder`, and returns the 3rd element (patch tokens). |
+| 2 | Plain forward only; no use of TIPSv2's dense-feature path. | Optional **value-attention** extraction (`feature_mode="value"`) gives sharper per-patch features for HTR; the `1 + num_register_tokens` prefix is dropped via the model's own attribute. |
 | 3 | `Qwen/Qwen3.5-0.8B` is named but text refers to "Qwen3.5-0.6B" — **0.6B doesn't exist in 3.5**. | Config: default `Qwen/Qwen3.5-0.8B`, alt `Qwen/Qwen3-0.6B`; hidden size read from `config.hidden_size`, never hardcoded. |
 | 4 | `projector = nn.Linear(1024, 1024)` — single linear, hardcoded dims, no token compression. | `PixelShuffleProjector`: shuffle ×2 then 2-layer MLP `(1024·4 → llm_hidden → llm_hidden)`, dims from configs. |
 | 5 | `torch.cat([vis_tokens, text_embeds])` with `labels=input_ids` — labels don't cover visual positions → length mismatch; trains on prompt + image. | `<image>` placeholder splicing via masked scatter; labels `-100` on image/prompt/pad. |
-| 6 | `image.resize((1024,1024))` — distorts aspect ratio; 1024 not divisible by 14. | AnyRes aspect-preserving tiling into 448 tiles (`14×32`) + thumbnail. |
-| 7 | `pixel/255` normalization only. | TIPS mean/std normalization (configurable). |
+| 6 | `image.resize((1024,1024))` — distorts aspect ratio; 1024 is not a TIPSv2 resolution and not divisible by 14. | Single high-res pass at a supported resolution (default 896, `aspect="pad"`) or AnyRes tiling — see §3. |
+| 7 | `pixel/255` normalization only. | **Correct as-is** — TIPSv2 is ToTensor/`[0,1]` with no mean/std. (An earlier draft of this doc wrongly proposed mean/std; reverted.) |
 | 8 | `<loc_x><loc_y>` strings never added to vocab. | `data/tokens.py` adds `<loc_0…999>`,`<line>`,`</line>`,`<image>` and resizes embeddings. |
 | 9 | Full-FT everything at 5e-6 from a random projector. | Staged: align projector → SFT LLM+proj → optional encoder unfreeze. |
 | 10 | `padding='max_length'` to 1024 every sample, no attention mask / no collator. | Dynamic padding collator with attention mask + image-token mask. |
@@ -209,18 +232,21 @@ projector while also updating pretrained weights:
 
 ## 9. Risks & open questions
 
-1. **TIPS variable-resolution behavior.** Confirm TIPSv2's native train resolution and that
-   bicubic pos-embed interpolation to 448 tiles holds dense quality (it's the linchpin).
-2. **TIPS license & checkpoint access.** Verify the TIPSv2 weights' license permits derived
-   model release; checkpoints come from `storage.googleapis.com/tips_data/` / HF `google/tips…`.
+1. **TIPS resolution interpolation.** TIPSv2 is trained mostly at 224/448; rungs up to 1792 rely
+   on positional-embedding interpolation. Validate dense quality at the resolution you pick — this
+   is the linchpin for small handwriting.
+2. **TIPS access & license.** The encoder loads from gated HF repos (`google/tipsv2-*-dpt`,
+   `trust_remote_code=True`); set `HF_TIPSv2`/`HF_TOKEN` and verify the weights' license permits a
+   derived release.
 3. **Decoder capacity.** 0.6–0.8B may bottleneck multilingual + long-page. Have Qwen3.5-2B ready
    as the next rung.
 4. **Visual-token count vs decoder cost.** The tile/shuffle budget is the main quality/latency
    dial; measure before committing.
 5. **Coordinate supervision quality.** Historical ALTO/PAGE-XML coordinates are noisy; quantize
    robustly and consider line-only (drop word boxes) if word-level supervision is too noisy.
-6. **Encoder is a JAX/Scenic-origin port.** The PyTorch path must load the `.npz` faithfully;
-   validate feature parity against the reference notebook before training.
+6. **Register-token count.** `num_register_tokens` isn't documented per variant; the wrapper reads
+   it from the model (`getattr(..., 1)`). Confirm it once real weights are loaded so the
+   value-attention prefix slice (`1 + num_register_tokens`) is correct.
 
 ---
 
@@ -232,11 +258,12 @@ README.md                 ← overview + quickstart
 requirements.txt
 placeholder.py            ← original napkin sketch (kept for reference; superseded by src/)
 configs/base.yaml         ← model + training configuration
-scripts/fetch_tips.sh     ← vendor the TIPS pytorch code into third_party/ (clone is blocked here)
+scripts/fetch_tips.sh     ← optional: vendor the TIPS source for offline/reference use
 src/hiptr/
-  config.py               ← dataclass configs
-  vision/tips_encoder.py  ← TIPS wrapper (+ DummyVisionEncoder for smoke tests)
-  vision/tiling.py        ← AnyRes aspect-preserving tiling
+  config.py               ← dataclass configs (vision, vision_input, connector, llm, …)
+  vision/tips_encoder.py  ← TIPSv2 HF loader + value-attention path (+ DummyVisionEncoder)
+  vision/preprocess.py    ← ToTensor-only preprocessing; single-pass / anyres
+  vision/tiling.py        ← AnyRes aspect-preserving tiling (anyres mode)
   model/projector.py      ← pixel-shuffle + MLP connector
   model/modeling_hiptr.py ← the VLM: image-token splicing, label masking
   data/tokens.py          ← location / structural special tokens

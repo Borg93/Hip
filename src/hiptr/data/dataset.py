@@ -2,12 +2,13 @@
 
 Each sample becomes:
 
-    [ instruction tokens ][ <image> * (n_tiles*tokens_per_tile) ][ target tokens ][ eos ]
-      labels: -100 ........ -100 ............................... target ........... eos
+    [ instruction tokens ][ <image> * sum(grid_tokens per unit) ][ target tokens ][ eos ]
+      labels: -100 ........ -100 .............................. target ........... eos
 
-Only the target contributes to the loss. ``n_tiles`` is decided per-image by the
-AnyRes tiler, so the number of ``<image>`` placeholders is computed per sample and
-must equal the number of visual tokens the model will produce for that image.
+Only the target contributes to the loss. ``n_units`` is 1 in single-pass mode or
+``n_tiles`` in anyres mode (see vision/preprocess.py), so the number of ``<image>``
+placeholders is computed per sample and must equal the number of visual tokens the
+model produces for that image.
 """
 from __future__ import annotations
 
@@ -19,23 +20,10 @@ import torch
 from torch.utils.data import Dataset
 
 from ..config import HipTRConfig
-from ..vision.tiling import tile_image
+from ..vision.preprocess import count_image_tokens, prepare_image
 from .alto import parse_alto
 
 INSTRUCTION = "Transcribe the handwriting with line coordinates."
-
-
-def _to_pixel_tensor(tiles, mean, std) -> torch.Tensor:
-    import numpy as np
-
-    arrs = []
-    for t in tiles:
-        a = torch.from_numpy(np.asarray(t.convert("RGB"), dtype="float32") / 255.0)
-        a = a.permute(2, 0, 1)  # [3, H, W]
-        for c in range(3):
-            a[c] = (a[c] - mean[c]) / std[c]
-        arrs.append(a)
-    return torch.stack(arrs, dim=0)  # [n_tiles, 3, T, T]
 
 
 class ALTOHTRDataset(Dataset):
@@ -60,14 +48,8 @@ class ALTOHTRDataset(Dataset):
         from PIL import Image
 
         image = Image.open(self.img_paths[idx]).convert("RGB")
-        tiles = tile_image(
-            image,
-            tile_size=self.cfg.tiling.tile_size,
-            max_tiles=self.cfg.tiling.max_tiles,
-            use_thumbnail=self.cfg.tiling.use_thumbnail,
-        )
-        pixel_values = _to_pixel_tensor(tiles, self.cfg.vision.image_mean, self.cfg.vision.image_std)
-        n_image_tokens = len(tiles) * self.cfg.tokens_per_tile
+        units = prepare_image(image, self.cfg)                 # list of [3, H, W]
+        n_image_tokens = count_image_tokens(units, self.cfg)
 
         target = parse_alto(
             self.xml_paths[idx],
@@ -84,12 +66,12 @@ class ALTOHTRDataset(Dataset):
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
-            "pixel_values": pixel_values,
+            "units": units,  # list of [3, H, W]; sizes may vary across samples
         }
 
 
 class HTRCollator:
-    """Dynamic right-padding; tiles concatenated across the batch in sample order."""
+    """Dynamic right-padding; image units concatenated across the batch in order."""
 
     def __init__(self, pad_token_id: int):
         self.pad_token_id = pad_token_id
@@ -103,10 +85,14 @@ class HTRCollator:
             input_ids.append(torch.cat([b["input_ids"], torch.full((pad,), self.pad_token_id)]))
             labels.append(torch.cat([b["labels"], torch.full((pad,), -100)]))
             attn.append(torch.cat([torch.ones(n, dtype=torch.long), torch.zeros(pad, dtype=torch.long)]))
+        # flat list of units across the batch, in the SAME order as the <image>
+        # placeholders appear (sample 0's units first, then sample 1's, ...)
+        pixel_values: List[torch.Tensor] = []
+        for b in batch:
+            pixel_values.extend(b["units"])
         return {
             "input_ids": torch.stack(input_ids),
             "labels": torch.stack(labels),
             "attention_mask": torch.stack(attn),
-            # concat tiles in the SAME order as the <image> placeholders appear
-            "pixel_values": torch.cat([b["pixel_values"] for b in batch], dim=0),
+            "pixel_values": pixel_values,
         }

@@ -2,18 +2,23 @@
 # Load it yourself (yaml -> HipTRConfig) or treat it as documentation of the knobs.
 
 vision:
-  variant: L            # S/B/L/SO/g ; L/14 -> 1024-dim is the recommended default
+  variant: L            # B/L/SO/g (no S in v2); L/14 -> 1024-dim recommended
   patch_size: 14
-  embed_dim: 1024
-  tips_pkg_path: third_party/tips/pytorch
-  checkpoint_path: null # e.g. third_party/tips/checkpoints/tips_v2_oss_l14_vision.npz
-  image_mean: [0.5, 0.5, 0.5]   # CONFIRM against the TIPS repo
-  image_std:  [0.5, 0.5, 0.5]
+  embed_dim: 1024       # B=768, L=1024, SO=1152, g=1536
+  feature_mode: intermediate   # intermediate (get_intermediate_layers) | standard | value
   freeze: true
+  # Loads from HF: google/tipsv2-{b14,l14,so400m14,g14}-dpt (trust_remote_code=True).
+  # Auth via env HF_TIPSv2 or HF_TOKEN. Preprocessing is ToTensor-only ([0,1]); no mean/std.
 
-tiling:
-  tile_size: 448        # 14*32 = 28*16, divisible by patch_size*pixel_shuffle
-  max_tiles: 12         # the main HTR quality/cost dial
+vision_input:
+  mode: native          # native (aspect-preserving rect) | single (square) | anyres (tiles)
+  native_target: 1372   # native: longer side resized toward this; both sides snapped to 28
+  native_max_side: 1792
+  native_min_side: 56
+  resolution: 896       # single mode; must be a multiple of patch_size*pixel_shuffle (28)
+  aspect: pad           # single: pad | squish
+  tile_size: 448        # anyres
+  max_tiles: 12         # anyres quality/cost dial
   use_thumbnail: true
 
 connector:

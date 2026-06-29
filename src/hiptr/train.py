@@ -80,7 +80,8 @@ def train(cfg: HipTRConfig, dummy_vision: bool = False):
     for epoch in range(cfg.train.epochs):
         running = 0.0
         for step, batch in enumerate(loader):
-            batch = {k: v.to(device) for k, v in batch.items()}
+            # pixel_values is a list of variable-size units; the model moves them itself
+            batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
             out = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],

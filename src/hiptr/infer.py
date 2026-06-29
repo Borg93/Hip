@@ -12,10 +12,10 @@ import argparse
 import torch
 
 from .config import HipTRConfig
-from .data.dataset import INSTRUCTION, _to_pixel_tensor
+from .data.dataset import INSTRUCTION
 from .data.tokens import add_htr_tokens
 from .model.modeling_hiptr import HipTRForHTR
-from .vision.tiling import tile_image
+from .vision.preprocess import count_image_tokens, prepare_image
 
 
 def load_model(cfg: HipTRConfig, ckpt: str | None, dummy_vision: bool = False):
@@ -38,17 +38,16 @@ def transcribe(model, tokenizer, cfg: HipTRConfig, image_path: str, max_new_toke
 
     device = next(model.parameters()).device
     image = Image.open(image_path).convert("RGB")
-    tiles = tile_image(image, cfg.tiling.tile_size, cfg.tiling.max_tiles, cfg.tiling.use_thumbnail)
-    pixel_values = _to_pixel_tensor(tiles, cfg.vision.image_mean, cfg.vision.image_std).to(device)
+    units = prepare_image(image, cfg)                     # list of [3, H, W]
 
     image_token_id = tokenizer.convert_tokens_to_ids(cfg.tokens.image_token)
     instr = tokenizer(INSTRUCTION, add_special_tokens=False).input_ids
-    n_img = len(tiles) * cfg.tokens_per_tile
+    n_img = count_image_tokens(units, cfg)
     input_ids = torch.tensor([instr + [image_token_id] * n_img], device=device)
     attention_mask = torch.ones_like(input_ids)
 
     out = model.generate(
-        input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values,
+        input_ids=input_ids, attention_mask=attention_mask, pixel_values=units,
         max_new_tokens=max_new_tokens, do_sample=False, num_beams=1,
     )
     return tokenizer.decode(out[0], skip_special_tokens=False)

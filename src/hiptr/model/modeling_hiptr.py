@@ -4,15 +4,16 @@ The key correctness fix over ``placeholder.py``: visual tokens are **spliced int
 ``<image>`` placeholder positions** via a masked scatter, instead of being
 ``cat``'d in front with mismatched labels. This means:
 
-  * the dataset inserts exactly ``n_tiles * tokens_per_tile`` ``<image>`` ids,
+  * the dataset inserts exactly ``sum(grid_tokens(h, w))`` ``<image>`` ids (one per
+    visual token, summed over the image's units),
   * ``labels`` are ``-100`` at image/prompt/pad positions (loss only on the target),
   * batching is trivial (no per-sample length surgery in the model),
-  * tiles are concatenated across the batch in the **same order** the placeholders
-    appear, so ``inputs_embeds[image_mask] = visual_tokens`` lines up row-for-row.
+  * units are encoded across the batch in the **same order** the placeholders appear,
+    so ``inputs_embeds[image_mask] = visual_tokens`` lines up row-for-row.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -48,7 +49,6 @@ class HipTRForHTR(nn.Module):
             activation=cfg.connector.activation,
         )
         self.image_token_id = tokenizer.convert_tokens_to_ids(cfg.tokens.image_token)
-        self.tokens_per_tile = cfg.tokens_per_tile
 
     # --- staged-training freeze helpers ------------------------------------
     def set_trainable(self, stage: str) -> None:
@@ -72,34 +72,46 @@ class HipTRForHTR(nn.Module):
             raise ValueError(f"unknown stage {stage!r}")
 
     # --- forward -----------------------------------------------------------
-    def encode_images(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """``[n_tiles, 3, T, T] -> [n_tiles*tokens_per_tile, llm_hidden]`` (flat)."""
-        patch = self.vision(pixel_values)            # [n_tiles, num_patches, vis_dim]
-        tokens = self.connector(patch)               # [n_tiles, tokens_per_tile, llm_hidden]
-        return tokens.reshape(-1, tokens.shape[-1])
+    def encode_images(self, units: List[torch.Tensor]) -> torch.Tensor:
+        """Encode a list of image units ``[3, H, W]`` -> ``[total_tokens, llm_hidden]``.
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,         # [B, L] with <image> placeholders
-        attention_mask: torch.Tensor,    # [B, L]
-        pixel_values: torch.Tensor,      # [sum_tiles, 3, T, T] across the whole batch
-        labels: Optional[torch.Tensor] = None,  # [B, L], -100 except target tokens
-    ):
+        Units may have different sizes (native rectangular mode), so each is encoded
+        on its own and the resulting token rows are concatenated in list order — the
+        same order the ``<image>`` placeholders appear across the batch.
+        """
+        device = next(self.llm.parameters()).device
+        rows = []
+        for u in units:
+            x = u.unsqueeze(0).to(device)                # [1, 3, H, W]
+            fmap = self.vision(x)                         # [1, C, h, w]
+            tokens = self.connector(fmap)                # [1, n_tok, llm_hidden]
+            rows.append(tokens[0])
+        return torch.cat(rows, dim=0)                    # [total_tokens, llm_hidden]
+
+    def _embed(self, input_ids, units):
         embeds = self.llm.get_input_embeddings()(input_ids)  # [B, L, H]
         image_mask = input_ids == self.image_token_id        # [B, L]
-
-        if pixel_values is not None and image_mask.any():
-            visual = self.encode_images(pixel_values).to(embeds.dtype)  # [N_img, H]
+        if units and image_mask.any():
+            visual = self.encode_images(units).to(embeds.dtype)  # [N_img, H]
             n_slots = int(image_mask.sum().item())
             if visual.shape[0] != n_slots:
                 raise ValueError(
                     f"{visual.shape[0]} visual tokens != {n_slots} <image> placeholders. "
-                    "The dataset must insert n_tiles*tokens_per_tile placeholders per sample "
-                    "and the collator must concat tiles in the same order."
+                    "The dataset inserts grid_tokens(h,w) placeholders per unit and the "
+                    "collator must keep units in the same order."
                 )
             embeds = embeds.clone()
             embeds[image_mask] = visual  # row-major scatter, batch-then-sequence order
+        return embeds
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,                 # [B, L] with <image> placeholders
+        attention_mask: torch.Tensor,            # [B, L]
+        pixel_values: List[torch.Tensor],        # flat list of [3, H, W] units (whole batch)
+        labels: Optional[torch.Tensor] = None,   # [B, L], -100 except target tokens
+    ):
+        embeds = self._embed(input_ids, pixel_values)
         return self.llm(
             inputs_embeds=embeds,
             attention_mask=attention_mask,
@@ -109,12 +121,7 @@ class HipTRForHTR(nn.Module):
 
     @torch.no_grad()
     def generate(self, input_ids, attention_mask, pixel_values, **gen_kwargs):
-        embeds = self.llm.get_input_embeddings()(input_ids)
-        image_mask = input_ids == self.image_token_id
-        if pixel_values is not None and image_mask.any():
-            visual = self.encode_images(pixel_values).to(embeds.dtype)
-            embeds = embeds.clone()
-            embeds[image_mask] = visual
+        embeds = self._embed(input_ids, pixel_values)
         return self.llm.generate(
             inputs_embeds=embeds, attention_mask=attention_mask, **gen_kwargs
         )

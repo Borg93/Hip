@@ -1,38 +1,55 @@
 """Configuration dataclasses for HipTR.
 
-Everything that the placeholder hardcoded (1024 dims, 1024px, the model ids) lives
-here instead, so the same code runs with Qwen3.5-0.8B or Qwen3-0.6B and any TIPS
+Everything the placeholder hardcoded (1024 dims, 1024px, the model ids) lives here
+instead, so the same code runs with Qwen3.5-0.8B or Qwen3-0.6B and any TIPSv2
 variant. Dimensions that depend on a loaded model (e.g. the LLM hidden size) are
 read from that model's config at build time, never hardcoded.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Tuple
 
 
 @dataclass
 class VisionConfig:
-    # TIPS variant: one of {"S","B","L","SO","g"}. L/14 is the recommended default.
+    # TIPSv2 variant: one of {"B","L","SO","g"} (there is no "S" in v2).
+    # L/14 (1024-dim) is the recommended default.
     variant: str = "L"
     patch_size: int = 14
-    embed_dim: int = 1024  # L/14 -> 1024 (B->768, SO->1152, g->1536, S->384)
-    # Path to the vendored TIPS pytorch package and the .npz vision checkpoint.
-    # See scripts/fetch_tips.sh (the repo cannot be cloned from this sandbox).
-    tips_pkg_path: str = "third_party/tips/pytorch"
-    checkpoint_path: Optional[str] = None  # e.g. ".../tips_v2_oss_l14_vision.npz"
-    # TIPS preprocessing normalization. CONFIRM these against the cloned repo;
-    # the (0.5, 0.5, 0.5) default is a placeholder, not gospel.
-    image_mean: Tuple[float, float, float] = (0.5, 0.5, 0.5)
-    image_std: Tuple[float, float, float] = (0.5, 0.5, 0.5)
-    freeze: bool = True  # frozen by default (unfreeze only in the optional stage C)
+    embed_dim: int = 1024  # B=768, L=1024, SO=1152, g=1536
+    # TIPSv2 loads directly from HuggingFace as a DPT AutoModel with
+    # trust_remote_code=True: google/tipsv2-{b14,l14,so400m14,g14}-dpt. The bare
+    # vision encoder is dpt._backbone.vision_encoder. Auth for the (gated) repo via
+    # env HF_TIPSv2 or HF_TOKEN. No local .npz/checkpoint wiring needed.
+    # "intermediate" (get_intermediate_layers, the official dense path), "standard"
+    # (plain forward), or "value" (value-attention dense feats).
+    feature_mode: str = "intermediate"
+    freeze: bool = True
+    # TIPSv2 preprocessing is ToTensor-only -> pixels in [0,1], NO ImageNet
+    # mean/std normalization. (See vision/preprocess.py.)
 
 
 @dataclass
-class TilingConfig:
-    tile_size: int = 448  # must be a multiple of patch_size * pixel_shuffle (14*2=28)
-    max_tiles: int = 12  # AnyRes upper bound; the main quality/cost dial for HTR
-    use_thumbnail: bool = True  # add a downsized global view for layout
+class VisionInputConfig:
+    # "native" (default): aspect-preserving rectangular resize, each side snapped to
+    #   patch_size*pixel_shuffle (the official TIPS dense recipe; no padding waste).
+    # "single": one square pass at `resolution`.
+    # "anyres": split the page into square tiles (very large / high-DPI pages).
+    mode: str = "native"
+    # native mode:
+    native_target: int = 1372      # the longer side is resized toward this
+    native_max_side: int = 1792    # clamp each side (keeps token counts sane)
+    native_min_side: int = 56      # = 2 * patch_size * pixel_shuffle (>=1 shuffled token)
+    # single mode:
+    resolution: int = 896          # must be a multiple of patch_size*pixel_shuffle
+    aspect: str = "pad"            # "pad" (preserve glyph aspect, letterbox) or "squish"
+    # anyres mode:
+    tile_size: int = 448           # multiple of patch_size * pixel_shuffle
+    max_tiles: int = 12
+    use_thumbnail: bool = True
+    # TIPSv2's documented square resolution ladder (all multiples of patch size 14).
+    supported_resolutions: Tuple[int, ...] = (224, 336, 448, 672, 896, 1120, 1372, 1792)
 
 
 @dataclass
@@ -44,8 +61,10 @@ class ConnectorConfig:
 
 @dataclass
 class LLMConfig:
-    # The smallest Qwen3.5 is 0.8B (there is NO Qwen3.5-0.6B). Use Qwen3-0.6B for a
-    # literal 0.6B decoder. hidden_size is taken from the loaded model, not set here.
+    # Smallest Qwen3.5 is 0.8B (there is NO Qwen3.5-0.6B); it is natively
+    # multimodal with a 262K context and hidden_size 1024. Use Qwen3-0.6B for a
+    # literal 0.6B (text-only, hidden 1024). hidden_size is read from the loaded
+    # model, never set here.
     model_id: str = "Qwen/Qwen3.5-0.8B"
     dtype: str = "bfloat16"
     attn_implementation: str = "sdpa"
@@ -92,7 +111,7 @@ class TrainConfig:
 @dataclass
 class HipTRConfig:
     vision: VisionConfig = field(default_factory=VisionConfig)
-    tiling: TilingConfig = field(default_factory=TilingConfig)
+    vision_input: VisionInputConfig = field(default_factory=VisionInputConfig)
     connector: ConnectorConfig = field(default_factory=ConnectorConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     tokens: TokenConfig = field(default_factory=TokenConfig)
@@ -100,17 +119,36 @@ class HipTRConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
 
     @property
-    def tokens_per_tile(self) -> int:
-        """Deterministic visual-token count per tile after pixel-shuffle.
+    def divisor(self) -> int:
+        """Pixels per shuffled visual token along one axis = patch_size * pixel_shuffle."""
+        return self.vision.patch_size * self.connector.pixel_shuffle
 
-        tile/patch gives the patch grid; pixel_shuffle squeezes it by that factor
-        on each axis. With tile=448, patch=14, shuffle=2 -> (448/14/2)^2 = 256.
+    def grid_tokens(self, h_pix: int, w_pix: int) -> int:
+        """Visual tokens for an image unit of ``h_pix x w_pix`` after pixel-shuffle."""
+        d = self.divisor
+        if h_pix % d or w_pix % d:
+            raise ValueError(
+                f"image unit {h_pix}x{w_pix} must have both sides divisible by "
+                f"patch_size*pixel_shuffle ({d})."
+            )
+        return (h_pix // d) * (w_pix // d)
+
+    @property
+    def tokens_per_tile(self) -> int:
+        """Fixed per-unit token count (single/anyres only; native varies per image).
+
+        single@896, patch 14, shuffle 2 -> (896/28)^2 = 1024; anyres tile 448 ->
+        (448/28)^2 = 256. In ``native`` mode token counts vary, so use
+        ``grid_tokens(h, w)`` per image instead.
         """
-        grid = self.tiling.tile_size // self.vision.patch_size
-        assert grid % self.connector.pixel_shuffle == 0, (
-            f"tile/patch grid ({grid}) must be divisible by pixel_shuffle "
-            f"({self.connector.pixel_shuffle}); pick a tile_size that is a multiple "
-            f"of patch_size*pixel_shuffle."
-        )
-        side = grid // self.connector.pixel_shuffle
-        return side * side
+        vi = self.vision_input
+        if vi.mode == "single":
+            side = vi.resolution
+        elif vi.mode == "anyres":
+            side = vi.tile_size
+        else:
+            raise ValueError(
+                "tokens_per_tile is fixed only for single/anyres; native mode varies "
+                "per image — use grid_tokens(h_pix, w_pix)."
+            )
+        return self.grid_tokens(side, side)

@@ -54,8 +54,27 @@ def test_special_tokens():
 
 def test_tokens_per_tile():
     cfg = HipTRConfig()
-    # tile 448 / patch 14 = 32 grid; shuffle 2 -> 16x16 = 256
+    assert cfg.vision_input.mode == "native"   # new default
+    assert cfg.divisor == 28                    # patch 14 * pixel_shuffle 2
+    # single @896 -> (896/28)^2 = 32^2 = 1024
+    cfg.vision_input.mode = "single"
+    assert cfg.tokens_per_tile == 1024
+    # anyres tile 448 -> (448/28)^2 = 16^2 = 256
+    cfg.vision_input.mode = "anyres"
     assert cfg.tokens_per_tile == 256
+
+
+def test_grid_tokens_rectangular():
+    cfg = HipTRConfig()
+    # a 1372x896 native unit -> (1372/28)*(896/28) = 49*32 = 1568
+    assert cfg.grid_tokens(1372, 896) == 49 * 32
+    # non-divisible sizes are rejected
+    raised = False
+    try:
+        cfg.grid_tokens(1000, 896)  # 1000 not divisible by 28
+    except ValueError:
+        raised = True
+    assert raised
 
 
 if __name__ == "__main__":
