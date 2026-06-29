@@ -9,9 +9,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from ..config import HipTRConfig
-from ..data.alto import parse_alto
+from ..data.alto import parse_page
 from ..data.dataset import ALTOHTRDataset, HTRCollator
-from ..eval import corpus_cer, page_text, parse_output
+from ..eval import corpus_cer, transcription
 from .schedule import build_optimizer, build_scheduler
 from .setup import build_model_and_tokenizer
 
@@ -51,16 +51,21 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, cfg: HipTRConfi
 
 @torch.no_grad()
 def evaluate(model, tokenizer, cfg: HipTRConfig, pairs: List[Tuple[str, str]]) -> float:
-    """Page-level CER over a small validation set (generate -> parse -> compare)."""
+    """Page-level CER over a small validation set (generate -> strip markup -> compare)."""
     from ..infer import transcribe
 
     model.eval()
+    d = cfg.data
     refs, hyps = [], []
     for img_path, xml_path in pairs[: cfg.train.eval_max_samples]:
         pred = transcribe(model, tokenizer, cfg, img_path)
-        hyps.append(page_text(parse_output(pred)))
-        gt = parse_alto(xml_path, cfg.tokens.num_loc_bins, cfg.data.granularity, cfg.data.poly_max_points)
-        refs.append(page_text(parse_output(gt)))
+        hyps.append(transcription(pred))
+        gt = parse_page(
+            xml_path, num_bins=cfg.tokens.num_loc_bins, output=d.output,
+            region_geometry=d.region_geometry, line_geometry=d.line_geometry,
+            include_region_type=d.include_region_type, poly_max_points=d.poly_max_points,
+        )
+        refs.append(transcription(gt))
     return corpus_cer(refs, hyps)
 
 

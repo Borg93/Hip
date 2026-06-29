@@ -1,22 +1,23 @@
 """Evaluation + output parsing for HipTR (pure stdlib, no torch).
 
 Provides:
-  * ``cer`` / ``wer`` and corpus-level aggregates (Levenshtein edit distance),
-  * ``parse_output`` — reverse of ``data/alto.py``: turn the model's
-    ``<line><poly>…</poly>text</line>`` string back into structured lines,
-  * ``page_text`` — concatenated transcription for page-level CER,
-  * ``to_page_xml`` — export predictions to PAGE-XML (de-quantizing <loc_*> bins).
-
-Kept dependency-free so metrics/parsing can be unit-tested without torch.
+  * ``cer`` / ``wer`` + corpus aggregates (Levenshtein edit distance),
+  * ``transcription`` — strip layout markup to plain reading-order text (for CER),
+  * ``parse_regions`` — turn the model's ``<page><region>…`` output into structured
+    regions (type, polygon, text),
+  * ``to_page_xml`` — export those regions to PAGE-XML (de-quantizing <loc_*> bins).
 """
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-_LINE_RE = re.compile(r"<line>(.*?)</line>", re.S)
-_POLY_RE = re.compile(r"<poly>(.*?)</poly>", re.S)
 _LOC_RE = re.compile(r"<loc_(\d+)>")
+_TYPE_BLOCK = re.compile(r"<type>.*?</type>", re.S)
+_STRUCT_TAG = re.compile(r"</?(?:page|region|line|poly)>")
+_REGION_RE = re.compile(r"<region>(.*?)</region>", re.S)
+_TYPE_RE = re.compile(r"<type>(.*?)</type>", re.S)
+_POLY_RE = re.compile(r"<poly>(.*?)</poly>", re.S)
 
 
 # --- edit distance & rates ------------------------------------------------
@@ -25,10 +26,8 @@ def edit_distance(a, b) -> int:
     if a == b:
         return 0
     la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
+    if la == 0 or lb == 0:
+        return la or lb
     prev = list(range(lb + 1))
     for i, ca in enumerate(a, 1):
         cur = [i] + [0] * lb
@@ -39,14 +38,12 @@ def edit_distance(a, b) -> int:
 
 
 def cer(ref: str, hyp: str) -> float:
-    """Character error rate = edit_distance(chars) / len(ref chars)."""
     if not ref:
         return 0.0 if not hyp else 1.0
     return edit_distance(ref, hyp) / len(ref)
 
 
 def wer(ref: str, hyp: str) -> float:
-    """Word error rate = edit_distance(words) / num ref words."""
     r, h = ref.split(), hyp.split()
     if not r:
         return 0.0 if not h else 1.0
@@ -54,7 +51,6 @@ def wer(ref: str, hyp: str) -> float:
 
 
 def corpus_cer(refs: List[str], hyps: List[str]) -> float:
-    """Aggregate CER = total edit distance / total reference characters."""
     dist = sum(edit_distance(r, h) for r, h in zip(refs, hyps))
     total = sum(len(r) for r in refs)
     return dist / total if total else 0.0
@@ -67,33 +63,33 @@ def corpus_wer(refs: List[str], hyps: List[str]) -> float:
 
 
 # --- output parsing -------------------------------------------------------
-def parse_output(s: str) -> List[Dict]:
-    """Parse ``<line>[<poly>locs</poly>]text</line>…`` into structured lines.
+def transcription(s: str) -> str:
+    """Strip layout markup (<page>/<region>/<type>/<poly>/<line>, <loc_*>) to the
+    plain reading-order transcription — the right text for CER/WER."""
+    s = _TYPE_BLOCK.sub(" ", s)
+    s = _LOC_RE.sub("", s)
+    s = _STRUCT_TAG.sub("\n", s)
+    return "\n".join(ln.strip() for ln in s.splitlines() if ln.strip())
 
-    Returns a list (in reading order) of ``{"points": [(xbin, ybin), …], "text": str}``.
-    Handles polygon, line-bbox, and bare formats. Coordinates are the quantized
-    ``<loc_*>`` bin indices (use ``to_page_xml`` to de-quantize to pixels).
+
+def parse_regions(s: str) -> List[Dict]:
+    """Parse ``<page><region>…`` output into ``[{type, points, text}]`` in reading order.
+
+    ``points`` are quantized ``<loc_*>`` bin pairs (use ``to_page_xml`` to de-quantize).
     """
     out: List[Dict] = []
-    blocks = _LINE_RE.findall(s)
-    if not blocks:
-        return out
-    for body in blocks:
+    for body in _REGION_RE.findall(s):
+        tm = _TYPE_RE.search(body)
+        rtype = tm.group(1).strip() if tm else ""
         pm = _POLY_RE.search(body)
         if pm:
             bins = [int(x) for x in _LOC_RE.findall(pm.group(1))]
-            text = body[pm.end():]
+            rest = body[pm.end():]
         else:
-            bins = [int(x) for x in _LOC_RE.findall(body)]
-            text = _LOC_RE.sub("", body)
-        pts = [(bins[i], bins[i + 1]) for i in range(0, len(bins) - 1, 2)]
-        out.append({"points": pts, "text": text.strip()})
+            bins, rest = [], _TYPE_RE.sub("", body)
+        points = [(bins[i], bins[i + 1]) for i in range(0, len(bins) - 1, 2)]
+        out.append({"type": rtype, "points": points, "text": transcription(rest)})
     return out
-
-
-def page_text(parsed: List[Dict], sep: str = "\n") -> str:
-    """Concatenated transcription (reading order) for page-level CER."""
-    return sep.join(line["text"] for line in parsed)
 
 
 # --- export ---------------------------------------------------------------
@@ -101,26 +97,27 @@ def _dequant(b: int, size: float, num_bins: int) -> int:
     return int(round(b / (num_bins - 1) * size))
 
 
-def to_page_xml(parsed: List[Dict], image_w: int, image_h: int, num_bins: int = 1000) -> str:
-    """Export parsed lines to minimal PAGE-XML (coords de-quantized to pixels)."""
+def _xml_escape(t: str) -> str:
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def to_page_xml(regions: List[Dict], image_w: int, image_h: int, num_bins: int = 1000) -> str:
+    """Export parsed regions to minimal PAGE-XML (coords de-quantized to pixels)."""
     ns = "http://schema.primaresearch.org/PAGE/gts/pagecontent/2019-07-15"
     rows = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<PcGts xmlns="{ns}">',
         f'  <Page imageWidth="{image_w}" imageHeight="{image_h}">',
-        '    <TextRegion id="r1">',
     ]
-    for i, line in enumerate(parsed):
+    for i, region in enumerate(regions):
         pts = " ".join(
             f"{_dequant(x, image_w, num_bins)},{_dequant(y, image_h, num_bins)}"
-            for x, y in line["points"]
+            for x, y in region["points"]
         )
-        text = (line["text"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-        rows += [
-            f'      <TextLine id="l{i}">',
-            f'        <Coords points="{pts}"/>',
-            f'        <TextEquiv><Unicode>{text}</Unicode></TextEquiv>',
-            '      </TextLine>',
-        ]
-    rows += ['    </TextRegion>', '  </Page>', '</PcGts>']
+        rows.append(f'    <TextRegion id="r{i}" type="{region.get("type", "")}">')
+        if pts:
+            rows.append(f'      <Coords points="{pts}"/>')
+        rows.append(f'      <TextEquiv><Unicode>{_xml_escape(region["text"])}</Unicode></TextEquiv>')
+        rows.append('    </TextRegion>')
+    rows += ['  </Page>', '</PcGts>']
     return "\n".join(rows)

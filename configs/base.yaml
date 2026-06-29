@@ -38,6 +38,12 @@ llm:
 tokens:
   num_loc_bins: 1000
   image_token: "<image>"
+  page_open: "<page>"
+  page_close: "</page>"
+  region_open: "<region>"
+  region_close: "</region>"
+  type_open: "<type>"
+  type_close: "</type>"
   line_open: "<line>"
   line_close: "</line>"
   poly_open: "<poly>"
@@ -45,12 +51,15 @@ tokens:
 
 data:
   img_dir: ./data/images
-  xml_dir: ./data/alto_xml
+  xml_dir: ./data/page_xml
   image_glob: "*.jpg"
   xml_glob: "*.xml"
-  granularity: polygon  # "polygon" (recommended, Surya-style) | "line" (bbox) | "word"
-  poly_max_points: 0    # >0 subsamples each polygon to at most this many vertices
-  max_target_len: 2048
+  output: page              # end-to-end: "page" (layout+reading order+text) | "lines" | "text"
+  region_geometry: poly     # region geometry: "poly" | "bbox" | "none"
+  line_geometry: none       # per-line geometry: "none" | "poly" | "bbox"
+  include_region_type: true
+  poly_max_points: 0        # >0 subsamples each polygon to at most this many vertices
+  max_target_len: 4096
 
 train:
   stage: align          # align -> sft -> encoder

@@ -1,17 +1,17 @@
 # HipTR
 
-**A compact, open Vision–Language Model for Handwritten Text Recognition (HTR)** — built by
-connecting the **TIPSv2** vision encoder to a small **Qwen3.5 / Qwen3** decoder.
+**A compact, open Vision–Language Model for end-to-end Handwritten Text Recognition (HTR)** —
+the **TIPSv2** vision encoder connected to a small **Qwen3.5-0.8B** decoder.
 
-The idea: TIPS gives you *dense, spatially-aware* patch features (great for the small strokes
-and layout of handwriting); a 0.6–0.8B Qwen decoder turns those features into a structured
-transcription — **text + reading order + coordinates** — in one model, exportable straight to
-**ALTO / PAGE-XML**.
+Feed a **whole page**; the model outputs its **layout (regions + types), reading order, and
+transcription** in a single pass — no line segmentation, no separate detector — exportable
+straight to **ALTO / PAGE-XML**. TIPS supplies dense, spatially-aware patch features (good for
+small strokes and page layout); the Qwen decoder turns them into the structured page.
 
 > Read **[DESIGN.md](./DESIGN.md)** for the full architecture, training recipe, and the
 > rationale (including a point-by-point critique of the original `placeholder.py` sketch).
-> See **[DATA.md](./DATA.md)** for how much data this actually needs (and how Surya-OCR-2
-> reached strong results without hyperscaler-scale human labels).
+> See **[DATA.md](./DATA.md)** for the data + training recipe — HipTR targets the data-rich
+> case: a large labeled page corpus, trained directly.
 
 ## Why these pieces
 
@@ -23,15 +23,14 @@ transcription — **text + reading order + coordinates** — in one model, expor
 
 > ⚠️ There is **no Qwen3.5-0.6B** — the smallest Qwen3.5 is **0.8B**, which is what HipTR uses.
 
-Prior art that shaped the design: **Surya-OCR-2** (≈650M Qwen3.5-style OCR VLM — closest
-analog), **Eagle/Embodied LocateAnything** (ViT+MLP+Qwen, parallel box decoding), and
-**Unlimited-OCR** (R-SWA for long one-shot page parsing). See DESIGN.md §1.
+Design lineage: a frozen high-res ViT + MLP connector + a small autoregressive LLM that emits
+geometry as coordinate tokens — the standard recipe for grounded document VLMs. See DESIGN.md §1.
 
 ## Layout
 
 ```
 DESIGN.md                  full design doc
-DATA.md                    how much data is needed + bootstrapping without big labels
+DATA.md                    data + training recipe (data-rich, direct training)
 pyproject.toml             packaging (hatchling, src layout), ruff + pytest config
 placeholder.py             original napkin sketch (kept for reference; superseded by src/)
 configs/base.yaml          all the knobs
@@ -57,7 +56,7 @@ export HF_TIPSv2=hf_...     # or HF_TOKEN
 
 # 4. exercise the full pipeline WITHOUT TIPS weights (random vision encoder)
 python -m hiptr.train --stage align --dummy-vision \
-  --img-dir ./data/images --xml-dir ./data/alto_xml
+  --img-dir ./data/images --xml-dir ./data/page_xml
 
 # 5. real training, staged (see DESIGN.md §5)
 python -m hiptr.train --stage align --llm Qwen/Qwen3.5-0.8B   # projector only
@@ -72,18 +71,19 @@ Run module commands from the `src/` directory (or `pip install -e .`) so `hiptr`
 
 ## Data
 
-Pairs of page images + ALTO/PAGE-XML transcriptions (IAM, READ/ICDAR-HTR, Bentham, Norhand,
-Transkribus / eScriptorium exports, …). `src/hiptr/data/alto.py` serializes them into the
-training target — per line, **polygon + text in reading order** (Surya-style):
+Whole **page** images + ALTO/PAGE-XML transcriptions (Transkribus / eScriptorium exports, READ,
+IAM, Bentham, Norhand, …). `src/hiptr/data/alto.py` serializes each page — in reading order —
+into the end-to-end target: regions (type + polygon) containing their text.
 
 ```
-<line><poly><loc_100><loc_143><loc_699><loc_143><loc_699><loc_171><loc_100><loc_171></poly>der Briefträger kam</line>
-<line><poly>...</poly>am Morgen</line>
+<page><region><type>paragraph</type><poly><loc_100><loc_143>...</poly>der Briefträger kam
+am Morgen</region><region><type>heading</type><poly>...</poly>Kapitel Ett</region></page>
 ```
 
 Coordinates are normalized + quantized to 1000 bins and added to the tokenizer as atomic
-`<loc_*>` tokens (with `<line>`/`<poly>`). Switch geometry via `data.granularity`:
-`polygon` (default) | `line` (bbox) | `word`; cap polygon vertices with `data.poly_max_points`.
+`<loc_*>` tokens (with `<page>`/`<region>`/`<type>`/`<poly>`). Tune via `data.output`
+(`page` | `lines` | `text`), `data.region_geometry` / `line_geometry` (`poly`|`bbox`|`none`),
+and `data.poly_max_points`.
 
 ## Status
 

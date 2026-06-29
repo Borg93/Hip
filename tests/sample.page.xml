@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2019-07-15">
+  <Page imageFilename="p1.jpg" imageWidth="1000" imageHeight="1400">
+    <ReadingOrder>
+      <OrderedGroup id="g0">
+        <RegionRefIndexed index="0" regionRef="r2"/>
+        <RegionRefIndexed index="1" regionRef="r1"/>
+      </OrderedGroup>
+    </ReadingOrder>
+    <TextRegion id="r1" type="heading">
+      <Coords points="100,80 900,80 900,140 100,140"/>
+      <TextLine id="r1l1">
+        <Coords points="100,80 900,80 900,140 100,140"/>
+        <TextEquiv><Unicode>Kapitel Ett</Unicode></TextEquiv>
+      </TextLine>
+    </TextRegion>
+    <TextRegion id="r2" type="paragraph">
+      <Coords points="100,200 900,200 900,600 100,600"/>
+      <TextLine id="r2l1">
+        <Coords points="100,200 900,200 900,240 100,240"/>
+        <TextEquiv><Unicode>der Briefträger kam</Unicode></TextEquiv>
+      </TextLine>
+      <TextLine id="r2l2">
+        <Coords points="100,260 900,260 900,300 100,300"/>
+        <TextEquiv><Unicode>am Morgen</Unicode></TextEquiv>
+      </TextLine>
+    </TextRegion>
+  </Page>
+</PcGts>

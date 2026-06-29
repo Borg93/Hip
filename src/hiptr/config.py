@@ -77,6 +77,12 @@ class LLMConfig:
 class TokenConfig:
     num_loc_bins: int = 1000  # coordinates quantized to <loc_0>..<loc_999>
     image_token: str = "<image>"
+    page_open: str = "<page>"
+    page_close: str = "</page>"
+    region_open: str = "<region>"
+    region_close: str = "</region>"
+    type_open: str = "<type>"
+    type_close: str = "</type>"
     line_open: str = "<line>"
     line_close: str = "</line>"
     poly_open: str = "<poly>"
@@ -86,12 +92,16 @@ class TokenConfig:
 @dataclass
 class DataConfig:
     img_dir: str = "./data/images"
-    xml_dir: str = "./data/alto_xml"
+    xml_dir: str = "./data/page_xml"
     image_glob: str = "*.jpg"
     xml_glob: str = "*.xml"
-    granularity: str = "polygon"  # "polygon" (recommended) | "line" (bbox) | "word"
-    poly_max_points: int = 0      # >0 subsamples each polygon to at most this many points
-    max_target_len: int = 2048
+    # end-to-end full-page target:
+    output: str = "page"            # "page" (layout+reading order+text) | "lines" | "text"
+    region_geometry: str = "poly"   # region geometry: "poly" | "bbox" | "none"
+    line_geometry: str = "none"     # per-line geometry: "none" | "poly" | "bbox"
+    include_region_type: bool = True
+    poly_max_points: int = 0        # >0 subsamples each polygon to at most this many vertices
+    max_target_len: int = 4096
 
 
 @dataclass

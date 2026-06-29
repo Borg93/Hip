@@ -19,26 +19,21 @@ Build a **small (≈1B-parameter class) end-to-end VLM** that takes a page (or l
 |---|---|---|
 | Vision encoder | **TIPSv2 L/14** (1024-dim, 303M, patch-14) | TIPS is explicitly optimized for **dense, spatially-aware patch features** (its headline result is spatial awareness + patch–text alignment). HTR is a *dense, spatial* task — every patch matters and small strokes carry signal. This is a better fit than a CLIP/SigLIP encoder tuned for global semantics. |
 | Connector | **Pixel-shuffle + 2-layer MLP** | Reduces visual token count (full pages explode patch counts) and bridges 1024 → LLM hidden. Mirrors InternVL / LLaVA-NeXT / Eagle's MLP connector. |
-| Language decoder | **Qwen3.5-0.8B** | Small, multilingual, 262K context, natively multimodal; `hidden_size` 1024 matches TIPS L/14. It is the smallest Qwen3.5 (there is no 0.6B in the 3.5 line). Surya-OCR-2 uses a "Qwen3.5-style ~650M" decoder for exactly this job, which validates the size class. |
+| Language decoder | **Qwen3.5-0.8B** | Small, multilingual, 262K context, natively multimodal; `hidden_size` 1024 matches TIPS L/14. It is the smallest Qwen3.5 (there is no 0.6B in the 3.5 line); ~0.8B is enough because both backbones are pretrained — the connector and the HTR head are what we actually train. |
 
-### How it differs from the reference projects
+### What's distinctive
 
-- **Surya-OCR-2** (`datalab-to/surya-ocr-2`) is already a ~650M Qwen3.5-style VLM that emits
-  layout-JSON / full-page HTML, with a *separate* EfficientViT line detector. It is the closest
-  prior art and proves the size class works. **Our differentiators:** (a) the **TIPSv2** encoder
-  (stronger dense spatial features than a generic encoder), and (b) a deliberate focus on
-  **handwriting + historical documents** with an **ALTO/PAGE-XML-native** coordinate output
-  format, rather than print-first general OCR.
-- **Eagle / Embodied → LocateAnything** (`NVlabs/Eagle/Embodied`) contributes the
-  **ViT + MLP-projector + Qwen** recipe and, importantly, **Parallel Box Decoding (PBD)** and
-  continual-SFT with configurable freezing/LoRA — directly relevant to predicting line/word
-  **bounding boxes** efficiently.
-- **Unlimited-OCR** (arXiv 2606.23050, Baidu) contributes **Reference Sliding-Window Attention
-  (R-SWA)** for *constant* KV-cache during very long one-shot page parsing — the right answer
-  to "a full handwritten page is a very long output sequence."
+- **End-to-end full page.** One forward pass over the whole page emits **layout (regions +
+  types), reading order, and transcription** — no line segmentation and no separate detector.
+- **TIPSv2 dense features.** A vision encoder built for spatial / patch–text alignment, which
+  suits the small strokes and dense layout of historical handwriting better than a globally-pooled
+  CLIP/SigLIP encoder.
+- **ALTO/PAGE-XML-native output.** Geometry is emitted as coordinate tokens and maps directly back
+  to the archival interchange formats, so predictions round-trip to Transkribus / eScriptorium.
 
-So the lineage is: **TIPS** (encoder) × **Eagle/Surya** (connector + coordinate decoding) ×
-**Unlimited-OCR** (long-output efficiency), specialized for **HTR**.
+Technique notes: the MLP connector + coordinate-token decoding is the standard grounded-VLM
+recipe; for very long pages a sliding-window / constant-KV-cache decoder keeps full-page
+generation affordable (see §6).
 
 ---
 
@@ -134,47 +129,46 @@ large / high-DPI scans.
 
 ## 4. Output format
 
-Like **Surya-OCR-2**, the model emits, per text line, its **geometry (polygon) + transcription**,
-with **line order = reading order**. Three targets are supported by the dataset layer:
-
-**(a) Polygon (default, recommended; Surya-style)** — a full polygon, then the text, per line:
+The model reads a **whole page** and emits its **layout + reading order + transcription** as one
+sequence. A page is a list of **regions in reading order**; each region carries a type and
+geometry, then its text:
 
 ```
-<line><poly><loc_100><loc_143><loc_699><loc_143><loc_699><loc_171><loc_100><loc_171></poly>der Briefträger kam</line>
-<line><poly>…</poly>am Morgen</line>
+<page><region><type>paragraph</type><poly><loc_100><loc_143>…</poly>der Briefträger kam
+am Morgen</region><region><type>heading</type><poly>…</poly>Kapitel Ett</region></page>
 ```
 
-Polygons come from ALTO `<Shape><Polygon POINTS>` or PAGE-XML `<Coords points>`; if a line has no
-polygon we fall back to its bbox as a 4-point rectangle. `data.poly_max_points` (>0) uniformly
-subsamples long baseline polygons to bound sequence length.
+- **Layout** = the region `<type>` (paragraph, heading, marginalia, table, …) plus its polygon.
+- **Reading order** = the order regions are emitted; no separate order head, the sequence *is*
+  the order. Uses PAGE `<ReadingOrder>` when present, else document order; sort regions at
+  data-prep time when geometry and reading order diverge (multi-column).
+- **Transcription** = each region's text (its lines joined by newlines).
 
-**(b) Line bbox** — `<line><loc_x0><loc_y0><loc_x1><loc_y1>text</line>` (axis-aligned; cheaper).
-
-**(c) Word-level** — `<loc_x><loc_y>word` per token (the placeholder's format).
-
-**Reading order** is the document order of the emitted lines — no separate order head; the
-sequence *is* the order (as in Surya). For layouts where geometry and reading order diverge
-(multi-column), sort the lines into reading order at data-prep time so the target reflects it.
+Geometry sources: PAGE `<Coords points>` or ALTO `<Shape><Polygon POINTS>` / `HPOS…`; a missing
+polygon falls back to the bbox rectangle. `data.poly_max_points` (>0) subsamples long polygons.
+Configurable via `data.*`: `output` (`page` | `lines` | `text`), `region_geometry` /
+`line_geometry` (`poly`|`bbox`|`none`), `include_region_type`.
 
 **Coordinate & structural tokens.** Coordinates are **quantized to 1000 bins** (0–999), normalized
 to page size, and added to the tokenizer as **atomic special tokens** `<loc_0>…<loc_999>` plus
-`<image>`, `<line>`, `</line>`, `<poly>`, `</poly>` (1005 new tokens). This is the
-Florence-2 / Pix2Struct / Surya approach. Without atomic tokens, `<loc_512>` shatters into BPE
-pieces and the model wastes capacity spelling numbers. **`placeholder.py` never adds these** — a bug.
+`<image>`, `<page>`, `<region>`, `<type>`, `<line>`, `<poly>` (and closers) — 1011 new tokens. The
+Florence-2 / Pix2Struct coordinate-token approach; without atomic tokens `<loc_512>` shatters into
+BPE pieces and the model wastes capacity spelling numbers. **`placeholder.py` never adds these.**
 
-The output exports straight to **ALTO** or **PAGE-XML**, the standard HTR interchange formats.
+The output maps straight back to **ALTO / PAGE-XML** (see `eval.to_page_xml`).
 
 ---
 
 ## 5. Training recipe
 
-Staged training (LLaVA / Eagle "continual SFT" style) — never train a randomly-initialized
-projector while also updating pretrained weights:
+Staged training — never train a randomly-initialized projector while also updating pretrained
+weights. With a large labeled page corpus you train directly on your own data: Stage A is a short
+projector warm-up, Stage B does the work, and synthetic data is not required.
 
 | Stage | Trainable | Data | LR | Purpose |
 |---|---|---|---|---|
-| **A. Alignment** | projector only (vision ❄, LLM ❄) | large, cheap **printed** OCR pairs (image → text) | ~1e-3 | teach the connector to map TIPS features into Qwen's space |
-| **B. HTR SFT** | projector + LLM (LoRA or full); vision ❄ | **handwritten** pages w/ ALTO/PAGE-XML (IAM, READ/ICDAR, Bentham, Norhand, transkribus exports) | ~1e-5 LLM / 2e-5 proj | learn handwriting + the coordinate/line output format |
+| **A. Alignment** | projector only (vision ❄, LLM ❄) | a slice of your pages (image → page text) | ~1e-3 | teach the connector to map TIPS features into Qwen's space |
+| **B. HTR SFT** | projector + LLM (LoRA or full); vision ❄ | your labeled **pages** (ALTO/PAGE-XML): layout + reading order + transcription | ~1e-5 LLM / 2e-5 proj | learn handwriting + the full-page output format |
 | **C. (optional) Encoder unfreeze** | + last *k* TIPS blocks | same as B, smaller | ~5e-6 | squeeze domain gains; risk of catastrophic forgetting — do last, low LR |
 
 - **Loss:** causal-LM cross-entropy on **target tokens only** — prompt, image placeholders, and
@@ -186,24 +180,23 @@ projector while also updating pretrained weights:
   logits length `N_vis + N_text` while labels stay `N_text` → shape error / silent misalignment.
 - **PEFT:** default to **LoRA** on the LLM (and projector full) for cheap iteration; full-FT as a
   later, well-resourced run. (Eagle supports exactly this freeze/LoRA matrix.)
-- **Curriculum:** start with single lines / clean scans, progress to full pages / degraded
-  historical documents. Augment: elastic distortion, ink bleed, rotation ±3°, contrast jitter.
+- **Curriculum:** start with cleaner pages, progress to degraded historical ones. Augment:
+  elastic distortion, ink bleed, rotation ±3°, contrast jitter.
 
 ---
 
 ## 6. Inference & long outputs
 
-- **Two deployment modes:**
-  1. **Detector → recognizer (pragmatic, Surya-style):** a small line detector (reuse Surya's
-     EfficientViT-SegFormer or train one) crops lines; the VLM transcribes each crop. Robust,
-     parallel, bounded output length. Best near-term accuracy/throughput.
-  2. **End-to-end full page (research track):** one forward pass emits the whole §4 structure.
-     Elegant, but the output is long → KV cache grows.
-- **Long-output efficiency:** adopt **R-SWA** (Unlimited-OCR) or a sliding-window decoder to keep
-  KV cache ~constant for full-page decoding; alternatively chunk by detected region. Qwen's 262K
-  context is a safety net, not a license to ignore decode cost.
-- **Decoding:** greedy/beam for fidelity; coordinate tokens benefit from constrained decoding
-  (only `<loc_*>` valid in coordinate slots) — a cheap accuracy win.
+- **End-to-end, single pass.** One forward over the page emits the whole §4 structure — layout,
+  reading order, and transcription together. No line detector, no per-line recognition pass.
+- **Long-output efficiency.** A full page is a long target sequence, so the decoder's KV cache
+  grows. Keep it affordable with a sliding-window / constant-KV-cache decoder; Qwen's 262K context
+  is a safety net, not a license to ignore decode cost. For very large pages, scale the **input**
+  with `anyres` tiling rather than splitting the output.
+- **Decoding.** Greedy/beam for fidelity; constrained decoding (only `<loc_*>` valid in coordinate
+  slots, structural tokens only where the grammar allows) is a cheap accuracy win.
+- **Export.** `eval.transcription` strips markup for CER; `eval.parse_regions` + `eval.to_page_xml`
+  round-trip predictions back to PAGE-XML.
 
 ---
 
@@ -220,7 +213,7 @@ projector while also updating pretrained weights:
 | 5 | `torch.cat([vis_tokens, text_embeds])` with `labels=input_ids` — labels don't cover visual positions → length mismatch; trains on prompt + image. | `<image>` placeholder splicing via masked scatter; labels `-100` on image/prompt/pad. |
 | 6 | `image.resize((1024,1024))` — distorts aspect ratio; 1024 is not a TIPSv2 resolution and not divisible by 14. | Single high-res pass at a supported resolution (default 896, `aspect="pad"`) or AnyRes tiling — see §3. |
 | 7 | `pixel/255` normalization only. | **Correct as-is** — TIPSv2 is ToTensor/`[0,1]` with no mean/std. (An earlier draft of this doc wrongly proposed mean/std; reverted.) |
-| 8 | `<loc_x><loc_y>` strings never added to vocab. | `data/tokens.py` adds `<loc_0…999>`,`<line>`,`</line>`,`<image>` and resizes embeddings. |
+| 8 | `<loc_x><loc_y>` strings never added to vocab. | `data/tokens.py` adds `<loc_0…999>` + `<image>/<page>/<region>/<type>/<line>/<poly>` (and closers) and resizes embeddings. |
 | 9 | Full-FT everything at 5e-6 from a random projector. | Staged: align projector → SFT LLM+proj → optional encoder unfreeze. |
 | 10 | `padding='max_length'` to 1024 every sample, no attention mask / no collator. | Dynamic padding collator with attention mask + image-token mask. |
 
@@ -228,13 +221,13 @@ projector while also updating pretrained weights:
 
 ## 8. Evaluation
 
-- **Metrics:** CER / WER (primary), plus layout metrics (line IoU, reading-order/BLEU-on-order)
-  for the end-to-end target. Report on held-out **handwritten** sets, not just print.
-- **Benchmarks:** IAM, READ2016/ICDAR-HTR, Bentham, Norhand/handwritten-Norwegian, plus
-  olmOCR-bench and a multilingual slice for parity with Surya-2 (83.3% olmOCR / 87.2% multilingual
-  are the public targets to beat or match at this size).
-- **Ablations:** TIPSv2 vs SigLIP/CLIP encoder; tile count; pixel-shuffle factor; LoRA vs full-FT;
-  line-mode vs end-to-end.
+- **Metrics:** CER / WER on the transcription (`eval.transcription` strips layout markup), plus
+  layout/order metrics — region IoU, region-type accuracy, and a reading-order score — for the
+  end-to-end target.
+- **Benchmarks:** your held-out pages (primary), plus public HTR sets (READ2016/ICDAR, IAM,
+  Bentham, Norhand) for comparability.
+- **Ablations:** TIPSv2 vs SigLIP/CLIP encoder; native vs single vs anyres input; pixel-shuffle
+  factor; `feature_mode` (intermediate/value/standard); LoRA vs full-FT; with/without region types.
 
 ---
 

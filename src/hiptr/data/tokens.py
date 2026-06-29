@@ -21,7 +21,14 @@ def location_tokens(num_bins: int = 1000) -> List[str]:
 
 
 def structural_tokens(cfg: TokenConfig) -> List[str]:
-    return [cfg.image_token, cfg.line_open, cfg.line_close, cfg.poly_open, cfg.poly_close]
+    return [
+        cfg.image_token,
+        cfg.page_open, cfg.page_close,
+        cfg.region_open, cfg.region_close,
+        cfg.type_open, cfg.type_close,
+        cfg.line_open, cfg.line_close,
+        cfg.poly_open, cfg.poly_close,
+    ]
 
 
 def all_special_tokens(cfg: TokenConfig) -> List[str]:

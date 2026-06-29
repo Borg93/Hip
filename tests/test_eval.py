@@ -1,22 +1,22 @@
-"""Eval-metric and output-parsing tests (pure Python; no torch)."""
+"""Eval-metric and page-output parsing tests (pure Python; no torch)."""
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from hiptr.data.alto import parse_alto  # noqa: E402
+from hiptr.data.alto import parse_page  # noqa: E402
 from hiptr.eval import (  # noqa: E402
     cer,
     corpus_cer,
     edit_distance,
-    page_text,
-    parse_output,
+    parse_regions,
     to_page_xml,
+    transcription,
     wer,
 )
 
-SAMPLE = os.path.join(ROOT, "tests", "sample.alto.xml")
+PAGE = os.path.join(ROOT, "tests", "sample.page.xml")
 
 
 def test_edit_distance():
@@ -26,41 +26,35 @@ def test_edit_distance():
 
 
 def test_cer_wer():
-    assert cer("abcd", "abxd") == 0.25            # 1 substitution / 4 chars
+    assert cer("abcd", "abxd") == 0.25
     assert abs(wer("a b c", "a x c") - 1 / 3) < 1e-9
     assert cer("", "") == 0.0
 
 
 def test_corpus_cer_aggregates_by_chars():
-    refs = ["abcd", "ef"]
-    hyps = ["abxd", "ef"]
-    assert corpus_cer(refs, hyps) == 1 / 6        # 1 error over 6 ref chars
+    assert corpus_cer(["abcd", "ef"], ["abxd", "ef"]) == 1 / 6
 
 
-def test_parse_output_polygon_roundtrip():
-    lines = parse_output(parse_alto(SAMPLE, granularity="polygon"))
-    assert len(lines) == 2
-    assert lines[0]["text"] == "der Briefträger kam"
-    assert lines[0]["points"][0] == (100, 143)    # first polygon vertex (quantized bins)
-    assert len(lines[0]["points"]) == 4
-    assert lines[1]["text"] == "am Morgen"
+def test_transcription_strips_layout_markup():
+    out = parse_page(PAGE, output="page")
+    # region types, polygons and loc tokens removed; reading-order text remains
+    assert transcription(out) == "der Briefträger kam\nam Morgen\nKapitel Ett"
 
 
-def test_parse_output_line_bbox():
-    lines = parse_output(parse_alto(SAMPLE, granularity="line"))
-    assert lines[0]["text"] == "der Briefträger kam"
-    assert len(lines[0]["points"]) == 2           # bbox = 2 corner points
-
-
-def test_page_text_reading_order():
-    txt = page_text(parse_output(parse_alto(SAMPLE, granularity="polygon")))
-    assert txt == "der Briefträger kam\nam Morgen"
+def test_parse_regions():
+    regions = parse_regions(parse_page(PAGE, output="page"))
+    assert len(regions) == 2
+    assert regions[0]["type"] == "paragraph"
+    assert regions[0]["text"] == "der Briefträger kam\nam Morgen"
+    assert regions[0]["points"][0] == (100, 143)   # first region-polygon vertex (bins)
 
 
 def test_to_page_xml_dequantizes():
-    xml = to_page_xml(parse_output(parse_alto(SAMPLE, granularity="polygon")), 1000, 1400)
-    assert "<Coords points=" in xml and "der Briefträger kam" in xml
-    assert "100,200" in xml                        # bin (100,143) -> px (100,200)
+    regions = parse_regions(parse_page(PAGE, output="page"))
+    xml = to_page_xml(regions, 1000, 1400)
+    assert 'type="paragraph"' in xml
+    assert "100,200" in xml                         # bin (100,143) -> px (100,200)
+    assert "der Briefträger kam" in xml
 
 
 if __name__ == "__main__":

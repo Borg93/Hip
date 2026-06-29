@@ -21,9 +21,9 @@ from torch.utils.data import Dataset
 
 from ..config import HipTRConfig
 from ..vision.preprocess import count_image_tokens, prepare_image
-from .alto import parse_alto
+from .alto import parse_page
 
-INSTRUCTION = "Transcribe the handwriting: for each line give its polygon and text, in reading order."
+INSTRUCTION = "Read the page end to end: output each region's type, polygon and text, in reading order."
 
 
 class ALTOHTRDataset(Dataset):
@@ -51,11 +51,15 @@ class ALTOHTRDataset(Dataset):
         units = prepare_image(image, self.cfg)                 # list of [3, H, W]
         n_image_tokens = count_image_tokens(units, self.cfg)
 
-        target = parse_alto(
+        d = self.cfg.data
+        target = parse_page(
             self.xml_paths[idx],
             num_bins=self.cfg.tokens.num_loc_bins,
-            granularity=self.cfg.data.granularity,
-            poly_max_points=self.cfg.data.poly_max_points,
+            output=d.output,
+            region_geometry=d.region_geometry,
+            line_geometry=d.line_geometry,
+            include_region_type=d.include_region_type,
+            poly_max_points=d.poly_max_points,
         )
         target_ids = self.tok(target, add_special_tokens=False).input_ids
         target_ids = target_ids[: self.cfg.data.max_target_len] + [self.tok.eos_token_id]
