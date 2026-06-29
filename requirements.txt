@@ -1,0 +1,14 @@
+# Core
+torch>=2.3
+transformers>=4.51        # Qwen3 / Qwen3.5 support
+numpy
+Pillow
+
+# Training (optional but recommended)
+peft>=0.11                # LoRA for the SFT stage
+accelerate>=0.30
+datasets
+
+# TIPS vision encoder is vendored, not pip-installed.
+# Run scripts/fetch_tips.sh to clone github.com/google-deepmind/tips into third_party/.
+# Its own extra deps (e.g. for .npz checkpoint loading) live in that repo.

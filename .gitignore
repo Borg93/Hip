@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Project
+third_party/
+checkpoints/
+data/
+*.pt
+*.npz
+
+# Env
+.venv/
+venv/
+.env

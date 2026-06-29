@@ -1,0 +1,59 @@
+# HipTR base configuration. Mirrors src/hiptr/config.py dataclasses.
+# Load it yourself (yaml -> HipTRConfig) or treat it as documentation of the knobs.
+
+vision:
+  variant: L            # S/B/L/SO/g ; L/14 -> 1024-dim is the recommended default
+  patch_size: 14
+  embed_dim: 1024
+  tips_pkg_path: third_party/tips/pytorch
+  checkpoint_path: null # e.g. third_party/tips/checkpoints/tips_v2_oss_l14_vision.npz
+  image_mean: [0.5, 0.5, 0.5]   # CONFIRM against the TIPS repo
+  image_std:  [0.5, 0.5, 0.5]
+  freeze: true
+
+tiling:
+  tile_size: 448        # 14*32 = 28*16, divisible by patch_size*pixel_shuffle
+  max_tiles: 12         # the main HTR quality/cost dial
+  use_thumbnail: true
+
+connector:
+  pixel_shuffle: 2      # 448 tile -> 32x32 patches -> 16x16 = 256 tokens/tile
+  mlp_depth: 2
+  activation: gelu
+
+llm:
+  model_id: Qwen/Qwen3.5-0.8B   # smallest Qwen3.5; use Qwen/Qwen3-0.6B for a literal 0.6B
+  dtype: bfloat16
+  attn_implementation: sdpa
+  use_lora: true
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+
+tokens:
+  num_loc_bins: 1000
+  image_token: "<image>"
+  line_open: "<line>"
+  line_close: "</line>"
+
+data:
+  img_dir: ./data/images
+  xml_dir: ./data/alto_xml
+  image_glob: "*.jpg"
+  xml_glob: "*.xml"
+  granularity: line     # "line" (recommended) or "word"
+  max_target_len: 2048
+
+train:
+  stage: align          # align -> sft -> encoder
+  output_dir: ./checkpoints
+  epochs: 5
+  batch_size: 2
+  grad_accum: 8
+  lr_projector: 1.0e-3
+  lr_llm: 1.0e-5
+  lr_vision: 5.0e-6
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  num_workers: 4
+  seed: 0

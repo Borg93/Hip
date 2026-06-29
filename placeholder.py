@@ -1,3 +1,10 @@
+# NOTE: This is the original napkin sketch of the idea. It is kept for reference
+# but is SUPERSEDED by the package in src/hiptr/. See DESIGN.md §7 for a
+# point-by-point list of what is wrong here (TIPS is not a HF AutoModel; labels
+# don't cover the spliced visual tokens; <loc_*> tokens are never added to the
+# vocab; the page is squished to a non-patch-divisible square; etc.) and how the
+# new code fixes each issue.
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader

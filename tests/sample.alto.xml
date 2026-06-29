@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alto xmlns="http://www.loc.gov/standards/alto/ns-v3#">
+  <Layout>
+    <Page ID="page1" WIDTH="1000" HEIGHT="1400" PHYSICAL_IMG_NR="1">
+      <PrintSpace HPOS="0" VPOS="0" WIDTH="1000" HEIGHT="1400">
+        <TextBlock ID="b1">
+          <TextLine ID="l1" HPOS="100" VPOS="200" WIDTH="600" HEIGHT="40">
+            <String ID="w1" HPOS="100" VPOS="200" WIDTH="180" HEIGHT="40" CONTENT="der"/>
+            <String ID="w2" HPOS="300" VPOS="200" WIDTH="200" HEIGHT="40" CONTENT="Briefträger"/>
+            <String ID="w3" HPOS="520" VPOS="200" WIDTH="180" HEIGHT="40" CONTENT="kam"/>
+          </TextLine>
+          <TextLine ID="l2" HPOS="100" VPOS="260" WIDTH="500" HEIGHT="40">
+            <String ID="w4" HPOS="100" VPOS="260" WIDTH="240" HEIGHT="40" CONTENT="am"/>
+            <String ID="w5" HPOS="360" VPOS="260" WIDTH="240" HEIGHT="40" CONTENT="Morgen"/>
+          </TextLine>
+        </TextBlock>
+      </PrintSpace>
+    </Page>
+  </Layout>
+</alto>
