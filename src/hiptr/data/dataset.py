@@ -23,7 +23,7 @@ from ..config import HipTRConfig
 from ..vision.preprocess import count_image_tokens, prepare_image
 from .alto import parse_alto
 
-INSTRUCTION = "Transcribe the handwriting with line coordinates."
+INSTRUCTION = "Transcribe the handwriting: for each line give its polygon and text, in reading order."
 
 
 class ALTOHTRDataset(Dataset):
@@ -55,6 +55,7 @@ class ALTOHTRDataset(Dataset):
             self.xml_paths[idx],
             num_bins=self.cfg.tokens.num_loc_bins,
             granularity=self.cfg.data.granularity,
+            poly_max_points=self.cfg.data.poly_max_points,
         )
         target_ids = self.tok(target, add_special_tokens=False).input_ids
         target_ids = target_ids[: self.cfg.data.max_target_len] + [self.tok.eos_token_id]

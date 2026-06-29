@@ -1,9 +1,9 @@
 """Configuration dataclasses for HipTR.
 
 Everything the placeholder hardcoded (1024 dims, 1024px, the model ids) lives here
-instead, so the same code runs with Qwen3.5-0.8B or Qwen3-0.6B and any TIPSv2
-variant. Dimensions that depend on a loaded model (e.g. the LLM hidden size) are
-read from that model's config at build time, never hardcoded.
+instead, so the same code runs with Qwen3.5-0.8B and any TIPSv2 variant.
+Dimensions that depend on a loaded model (e.g. the LLM hidden size) are read from
+that model's config at build time, never hardcoded.
 """
 from __future__ import annotations
 
@@ -61,10 +61,9 @@ class ConnectorConfig:
 
 @dataclass
 class LLMConfig:
-    # Smallest Qwen3.5 is 0.8B (there is NO Qwen3.5-0.6B); it is natively
-    # multimodal with a 262K context and hidden_size 1024. Use Qwen3-0.6B for a
-    # literal 0.6B (text-only, hidden 1024). hidden_size is read from the loaded
-    # model, never set here.
+    # Qwen3.5-0.8B: the smallest Qwen3.5 (there is no 0.6B in 3.5). Natively
+    # multimodal, 262K context, hidden_size 1024 (matches TIPS L/14). hidden_size
+    # is read from the loaded model, never set here.
     model_id: str = "Qwen/Qwen3.5-0.8B"
     dtype: str = "bfloat16"
     attn_implementation: str = "sdpa"
@@ -80,6 +79,8 @@ class TokenConfig:
     image_token: str = "<image>"
     line_open: str = "<line>"
     line_close: str = "</line>"
+    poly_open: str = "<poly>"
+    poly_close: str = "</poly>"
 
 
 @dataclass
@@ -88,7 +89,8 @@ class DataConfig:
     xml_dir: str = "./data/alto_xml"
     image_glob: str = "*.jpg"
     xml_glob: str = "*.xml"
-    granularity: str = "line"  # "line" (recommended) or "word"
+    granularity: str = "polygon"  # "polygon" (recommended) | "line" (bbox) | "word"
+    poly_max_points: int = 0      # >0 subsamples each polygon to at most this many points
     max_target_len: int = 2048
 
 

@@ -27,7 +27,7 @@ connector:
   activation: gelu
 
 llm:
-  model_id: Qwen/Qwen3.5-0.8B   # smallest Qwen3.5; use Qwen/Qwen3-0.6B for a literal 0.6B
+  model_id: Qwen/Qwen3.5-0.8B   # smallest Qwen3.5 (no 0.6B in 3.5); hidden_size 1024
   dtype: bfloat16
   attn_implementation: sdpa
   use_lora: true
@@ -40,13 +40,16 @@ tokens:
   image_token: "<image>"
   line_open: "<line>"
   line_close: "</line>"
+  poly_open: "<poly>"
+  poly_close: "</poly>"
 
 data:
   img_dir: ./data/images
   xml_dir: ./data/alto_xml
   image_glob: "*.jpg"
   xml_glob: "*.xml"
-  granularity: line     # "line" (recommended) or "word"
+  granularity: polygon  # "polygon" (recommended, Surya-style) | "line" (bbox) | "word"
+  poly_max_points: 0    # >0 subsamples each polygon to at most this many vertices
   max_target_len: 2048
 
 train:

@@ -19,7 +19,7 @@ Build a **small (≈1B-parameter class) end-to-end VLM** that takes a page (or l
 |---|---|---|
 | Vision encoder | **TIPSv2 L/14** (1024-dim, 303M, patch-14) | TIPS is explicitly optimized for **dense, spatially-aware patch features** (its headline result is spatial awareness + patch–text alignment). HTR is a *dense, spatial* task — every patch matters and small strokes carry signal. This is a better fit than a CLIP/SigLIP encoder tuned for global semantics. |
 | Connector | **Pixel-shuffle + 2-layer MLP** | Reduces visual token count (full pages explode patch counts) and bridges 1024 → LLM hidden. Mirrors InternVL / LLaVA-NeXT / Eagle's MLP connector. |
-| Language decoder | **Qwen3.5-0.8B** (or **Qwen3-0.6B**) | Small, multilingual (119 langs), 262K context, Apache-2.0. The smallest *Qwen3.5* is **0.8B** — there is **no Qwen3.5-0.6B**; if you want the literal 0.6B use **Qwen3-0.6B**. Surya-OCR-2 uses a "Qwen3.5-style ~650M" decoder for exactly this job, which validates the size class. |
+| Language decoder | **Qwen3.5-0.8B** | Small, multilingual, 262K context, natively multimodal; `hidden_size` 1024 matches TIPS L/14. It is the smallest Qwen3.5 (there is no 0.6B in the 3.5 line). Surya-OCR-2 uses a "Qwen3.5-style ~650M" decoder for exactly this job, which validates the size class. |
 
 ### How it differs from the reference projects
 
@@ -134,27 +134,35 @@ large / high-DPI scans.
 
 ## 4. Output format
 
-Two production-relevant targets, both supported by the dataset layer:
+Like **Surya-OCR-2**, the model emits, per text line, its **geometry (polygon) + transcription**,
+with **line order = reading order**. Three targets are supported by the dataset layer:
 
-**(a) Line-level, layout-aware (recommended canonical target)** — one segment per text line,
-each prefixed by its quantized bounding box, in reading order:
+**(a) Polygon (default, recommended; Surya-style)** — a full polygon, then the text, per line:
 
 ```
-<line><loc_023><loc_041><loc_512><loc_058>der Briefträger kam am Morgen</line>
-<line><loc_024><loc_060><loc_498><loc_077>und brachte die Nachricht ...</line>
+<line><poly><loc_100><loc_143><loc_699><loc_143><loc_699><loc_171><loc_100><loc_171></poly>der Briefträger kam</line>
+<line><poly>…</poly>am Morgen</line>
 ```
 
-**(b) Word-level** (what `placeholder.py` sketched) — `<loc_x><loc_y>word` per token. Higher
-coordinate density but more brittle reading order; kept as an option.
+Polygons come from ALTO `<Shape><Polygon POINTS>` or PAGE-XML `<Coords points>`; if a line has no
+polygon we fall back to its bbox as a 4-point rectangle. `data.poly_max_points` (>0) uniformly
+subsamples long baseline polygons to bound sequence length.
 
-**Coordinate tokens.** Coordinates are **quantized to 1000 bins** (0–999), normalized to page
-size, and added to the tokenizer as **special tokens** `<loc_0>…<loc_999>` (+ `<line>`,`</line>`,
-`<image>`). This is the Florence-2 / Pix2Struct / Surya approach. Without adding them as atoms,
-`<loc_512>` tokenizes into several BPE pieces and the model wastes capacity learning to spell
-numbers. **`placeholder.py` never adds these tokens** — a correctness bug.
+**(b) Line bbox** — `<line><loc_x0><loc_y0><loc_x1><loc_y1>text</line>` (axis-aligned; cheaper).
 
-This format makes the model emit **transcription + reading order + geometry** in one pass,
-exportable straight to **ALTO** or **PAGE-XML**, the standard HTR interchange formats.
+**(c) Word-level** — `<loc_x><loc_y>word` per token (the placeholder's format).
+
+**Reading order** is the document order of the emitted lines — no separate order head; the
+sequence *is* the order (as in Surya). For layouts where geometry and reading order diverge
+(multi-column), sort the lines into reading order at data-prep time so the target reflects it.
+
+**Coordinate & structural tokens.** Coordinates are **quantized to 1000 bins** (0–999), normalized
+to page size, and added to the tokenizer as **atomic special tokens** `<loc_0>…<loc_999>` plus
+`<image>`, `<line>`, `</line>`, `<poly>`, `</poly>` (1005 new tokens). This is the
+Florence-2 / Pix2Struct / Surya approach. Without atomic tokens, `<loc_512>` shatters into BPE
+pieces and the model wastes capacity spelling numbers. **`placeholder.py` never adds these** — a bug.
+
+The output exports straight to **ALTO** or **PAGE-XML**, the standard HTR interchange formats.
 
 ---
 
@@ -207,7 +215,7 @@ projector while also updating pretrained weights:
 |---|---|---|
 | 1 | `self.vision_model(pixel_values).last_hidden_state` — the **load id is correct** (TIPSv2 *is* a HF AutoModel via the `-dpt` repos), but you must call `dpt._get_backbone()` and use `dpt._backbone.vision_encoder`, whose forward returns a **3-tuple** `(cls, _, patch_tokens)` — there is no `.last_hidden_state`. | `vision/tips_encoder.py` loads the DPT AutoModel, grabs `._backbone.vision_encoder`, and returns the 3rd element (patch tokens). |
 | 2 | Plain forward only; no use of TIPSv2's dense-feature path. | Optional **value-attention** extraction (`feature_mode="value"`) gives sharper per-patch features for HTR; the `1 + num_register_tokens` prefix is dropped via the model's own attribute. |
-| 3 | `Qwen/Qwen3.5-0.8B` is named but text refers to "Qwen3.5-0.6B" — **0.6B doesn't exist in 3.5**. | Config: default `Qwen/Qwen3.5-0.8B`, alt `Qwen/Qwen3-0.6B`; hidden size read from `config.hidden_size`, never hardcoded. |
+| 3 | `Qwen/Qwen3.5-0.8B` is named but the comment refers to "Qwen3.5-0.6B" — **0.6B doesn't exist in 3.5**. | Config uses `Qwen/Qwen3.5-0.8B`; hidden size read from `config.hidden_size`, never hardcoded. |
 | 4 | `projector = nn.Linear(1024, 1024)` — single linear, hardcoded dims, no token compression. | `PixelShuffleProjector`: shuffle ×2 then 2-layer MLP `(1024·4 → llm_hidden → llm_hidden)`, dims from configs. |
 | 5 | `torch.cat([vis_tokens, text_embeds])` with `labels=input_ids` — labels don't cover visual positions → length mismatch; trains on prompt + image. | `<image>` placeholder splicing via masked scatter; labels `-100` on image/prompt/pad. |
 | 6 | `image.resize((1024,1024))` — distorts aspect ratio; 1024 is not a TIPSv2 resolution and not divisible by 14. | Single high-res pass at a supported resolution (default 896, `aspect="pad"`) or AnyRes tiling — see §3. |

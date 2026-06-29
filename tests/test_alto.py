@@ -44,12 +44,32 @@ def test_alto_word_format():
     print("word:", out)
 
 
+def test_alto_polygon_format():
+    out = parse_alto(SAMPLE, num_bins=1000, granularity="polygon")
+    assert out.count("<poly>") == 2 and out.count("</poly>") == 2
+    assert out.count("<line>") == 2
+    # l1 polygon first vertex (100,200) -> <loc_100><loc_143>; 4 vertices -> 8 loc tokens
+    assert out.startswith("<line><poly><loc_100><loc_143><loc_699><loc_143>")
+    assert "</poly>der Briefträger kam</line>" in out
+    assert "am Morgen</line>" in out
+    print("polygon:", out)
+
+
+def test_alto_polygon_default_and_subsample():
+    # polygon is the default granularity
+    assert parse_alto(SAMPLE) == parse_alto(SAMPLE, granularity="polygon")
+    # subsampling caps vertices: 4-pt polygon -> 2 pts -> 4 loc tokens per line
+    capped = parse_alto(SAMPLE, granularity="polygon", poly_max_points=2)
+    assert capped.count("<loc_") == 2 * 2 * 2  # 2 lines * 2 pts * (x,y)
+
+
 def test_special_tokens():
     locs = location_tokens(1000)
     assert locs[0] == "<loc_0>" and locs[-1] == "<loc_999>" and len(locs) == 1000
     toks = all_special_tokens(TokenConfig())
-    assert "<image>" in toks and "<line>" in toks and "</line>" in toks
-    assert len(toks) == 1003  # 3 structural + 1000 loc
+    for t in ("<image>", "<line>", "</line>", "<poly>", "</poly>"):
+        assert t in toks
+    assert len(toks) == 1005  # 5 structural + 1000 loc
 
 
 def test_tokens_per_tile():
