@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hiptr"
+version = "0.1.0"
+description = "A TIPSv2 + Qwen3.5 vision-language model for handwritten text recognition"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = "Apache-2.0"
+authors = [{ name = "Gabriel Borg" }]
+keywords = ["htr", "ocr", "vlm", "tips", "qwen", "handwriting"]
+dependencies = [
+    "torch>=2.6",
+    "transformers>=4.51",
+    "numpy",
+    "pillow",
+]
+
+[project.optional-dependencies]
+train = ["peft>=0.11", "accelerate>=0.30"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+hiptr-train = "hiptr.train:main"
+hiptr-infer = "hiptr.infer:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hiptr"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["C", "E", "F", "I", "W"]
+ignore = ["C901", "E741", "W605"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a GPU and downloaded model weights",
+    "slow: slow tests (model downloads / training)",
+]

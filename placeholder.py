@@ -1,3 +1,12 @@
+# NOTE: This is the original napkin sketch of the idea. It is kept for reference
+# but is SUPERSEDED by the package in src/hiptr/. The load id below is actually
+# correct (TIPSv2 *is* a HF AutoModel via the -dpt repos), but you must use
+# dpt._backbone.vision_encoder and its 3-tuple forward (there is no
+# .last_hidden_state); labels must cover the spliced visual tokens; <loc_*> must
+# be added to the tokenizer; normalization is ToTensor/[0,1] (the /255 here is
+# fine); and 1024px is not divisible by the patch size (14). See DESIGN.md §7 for
+# the full point-by-point list and how the new code fixes each issue.
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
