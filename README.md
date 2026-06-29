@@ -10,6 +10,8 @@ transcription — **text + reading order + coordinates** — in one model, expor
 
 > Read **[DESIGN.md](./DESIGN.md)** for the full architecture, training recipe, and the
 > rationale (including a point-by-point critique of the original `placeholder.py` sketch).
+> See **[DATA.md](./DATA.md)** for how much data this actually needs (and how Surya-OCR-2
+> reached strong results without hyperscaler-scale human labels).
 
 ## Why these pieces
 
@@ -29,6 +31,7 @@ analog), **Eagle/Embodied LocateAnything** (ViT+MLP+Qwen, parallel box decoding)
 
 ```
 DESIGN.md                  full design doc
+DATA.md                    how much data is needed + bootstrapping without big labels
 placeholder.py             original napkin sketch (kept for reference; superseded by src/)
 configs/base.yaml          all the knobs
 scripts/fetch_tips.sh      optional: vendor TIPS source for the offline/.npz path
